@@ -62,10 +62,17 @@
 
             // Головний контейнер, до якого увійдуть всі 3D об'єкти для програми
             var markerRoot, mainContainer;
+            var markerRoots = [];
+            var repeatOptions = [false, false, false, false, false, false];
 
             // Окремий масив для зберігання всього аудіо та відео контенту, який буде
             // запущений натисканням на екран смартфона
             var audioContent = [];
+            let markerMedia = [];
+            let lastSeenTime = new Array(6).fill(0);
+            let mediaPlayed = new Array(6).fill(false);
+            const DEBOUNCE_TIME = 400;
+            let activeMarkerIndex = -1;
 
             var contentPromises = [];
 
@@ -172,10 +179,10 @@
                 // Масив файлів аудіо, якщо немає аудіо буде так само порожній рядок
                 const audioFiles = ["1-mriya.mp3" ,"2-dobrota.mp3" ,"3-love.mp3" ,"4-risk.mp3" ,"5-bajanya.mp3", "present.mp3"];
                 // Масив опцій повтору аудіо та відео контенту, по дефолту для всіх буде false
-                const repeatOptions = ["false" ,"false" ,"false" ,"false" ,"false", "false"];
+                repeatOptions = [false, false, false, false, false, false];
   
                 // Створюємо масив для всіх маркерів
-                const markerRoots = [];
+                markerRoots = [];
                 for (let i = 0; i < 6; i++) {
                     markerRoots[i] = new THREE.Group();
                 }
@@ -259,10 +266,11 @@
                             video.src = `${videoFiles[i]}`;
                             video.playsInline = true;
                             // Встановлюємо відео на автоповтор залежно від значення у масиві
-                            if (repeatOptions[i]) {
+                            if (repeatOptions[i] === true || repeatOptions[i] === 'true') {
+                                video.loop = true;
                                 video.addEventListener('ended', () => {
                                     video.play();
-                                })
+                                });
                             }
                             // Додаємо відео до масиву аудіо контенту
                             if (patternBarcode[i] === -1) {
@@ -270,6 +278,8 @@
                             } else {
                                 barcodesSound.set(patternBarcode[i], video);
                             }
+                            markerMedia[i] = markerMedia[i] || {};
+                            markerMedia[i].video = video;
                             // Перенаправляємо текстуру з відео на матеріал для площини.
                             let texture2 = new THREE.VideoTexture(video);
                             texture2.minFilter = THREE.LinearFilter;
@@ -311,21 +321,23 @@
                                 let sound = new THREE.Audio(listener);
                                 sound.name = `${audioFiles[i]}`;
                                 sound.setBuffer(buffer);
-                                // Встановлюємо відео на автоповтор залежно від значення у масиві
-                                if (repeatOptions[i]) {
+                                // Встановлюємо автоповтор аудіо залежно від значення у масиві
+                                if (repeatOptions[i] === true || repeatOptions[i] === 'true') {
                                     sound.setLoop(true);
+                                } else {
+                                    sound.setLoop(false);
                                 }
                                 if (patternBarcode[i] === -1) {
                                     patternsSound.set(i, sound);
                                 } else {
                                     barcodesSound.set(patternBarcode[i], sound);
                                 }
-                                resolve(sound)
+                                markerMedia[i] = markerMedia[i] || {};
+                                markerMedia[i].sound = sound;
+                                resolve(sound);
                             });
                         }).then((sound) => {
-                            sound.play()
-                            sound.stop()
-                            console.log(`File ${sound.name} loaded`)
+                            console.log(`File ${sound.name} loaded`);
                         }))
                     }
                 }
@@ -372,40 +384,90 @@
                 return box1.intersectsBox(box2);
             };
 
+            function playMedia(i) {
+                if (!markerMedia[i]) return;
+                const media = markerMedia[i];
+                const shouldLoop = repeatOptions[i] === true || repeatOptions[i] === 'true';
+
+                if (media.sound) {
+                    if (!mediaPlayed[i]) {
+                        if (!media.sound.isPlaying) {
+                            media.sound.play();
+                        }
+                        mediaPlayed[i] = true;
+                    } else if (shouldLoop && !media.sound.isPlaying) {
+                        media.sound.play();
+                    }
+                }
+
+                if (media.video) {
+                    if (media.video.paused) {
+                        media.video.play();
+                    }
+                }
+            }
+
+            function stopMedia(i) {
+                if (!markerMedia[i]) return;
+                const media = markerMedia[i];
+
+                if (media.sound && media.sound.isPlaying) {
+                    media.sound.stop();
+                }
+                if (media.video && !media.video.paused) {
+                    media.video.pause();
+                }
+                mediaPlayed[i] = false;
+            }
+
             // Оновлюємо AR контент на кожен кадр
             function update() {
                 if (arToolkitSource.ready !== false) {
                     arToolkitContext.update(arToolkitSource.domElement);
                     if (contentInitialized) {
-                        if (barcodesID.length) {
-                            barcodesID.forEach((elem, index) => {
-                                if (arToolkitContext.arController.barcodeMarkers[elem].inCurrent) {
-                                    let sound = barcodesSound.get(elem);
-                                    if (sound && !sound.isPlaying) sound.play();
-                                } else {
-                                    let sound = barcodesSound.get(elem);
-                                    if (sound && sound.nodeName === 'VIDEO') {
-                                        if (!sound.paused) sound.pause()
-                                    }
-                                    if (sound && sound.isPlaying) sound.stop();
-                                }
-                            })
+                        const now = performance.now();
+
+                        // Оновлюємо мітку часу для всіх маркерів, які видимі в поточному кадрі
+                        for (let i = 0; i < markerRoots.length; i++) {
+                            if (markerRoots[i] && markerRoots[i].visible) {
+                                lastSeenTime[i] = now;
+                            }
                         }
-                        if (patternsID.length) {
-                            for (let index = 0; index < patternsID.length; index++) {
-                                if (arToolkitContext.arController.patternMarkers[index].inCurrent) {
-                                    let patternID = (arToolkitContext.arController.patternMarkers[index].markerWidth - 1) * patternIdOffset - 1;
-                                    patternID = Math.round(patternID)
-                                    let sound = patternsSound.get(patternID);
-                                    if (sound && !sound.isPlaying) sound.play();
-                                } else {
-                                    let patternID = (arToolkitContext.arController.patternMarkers[index].markerWidth - 1) * patternIdOffset - 1;
-                                    patternID = Math.round(patternID)
-                                    let sound = patternsSound.get(patternID);
-                                    if (sound && sound.nodeName === 'VIDEO') {
-                                        if (!sound.paused) sound.pause()
+
+                        // Перевіряємо поточний активний маркер
+                        if (activeMarkerIndex !== -1) {
+                            if (markerRoots[activeMarkerIndex] && markerRoots[activeMarkerIndex].visible) {
+                                // Активний маркер все ще видимий — продовжуємо відтворення
+                                playMedia(activeMarkerIndex);
+                            } else {
+                                // Активний маркер втрачено у поточному кадрі.
+                                // Шукаємо, чи з'явився інший видимий маркер для швидкого перемикання
+                                let newVisibleIndex = -1;
+                                for (let i = 0; i < markerRoots.length; i++) {
+                                    if (i !== activeMarkerIndex && markerRoots[i] && markerRoots[i].visible) {
+                                        newVisibleIndex = i;
+                                        break;
                                     }
-                                    if (sound && sound.isPlaying) sound.stop();
+                                }
+
+                                if (newVisibleIndex !== -1) {
+                                    // Миттєво перемикаємо на новий маркер
+                                    stopMedia(activeMarkerIndex);
+                                    activeMarkerIndex = newVisibleIndex;
+                                    playMedia(activeMarkerIndex);
+                                } else if (now - lastSeenTime[activeMarkerIndex] >= DEBOUNCE_TIME) {
+                                    // Інших маркерів немає, і час очікування вичерпано — зупиняємо звук
+                                    stopMedia(activeMarkerIndex);
+                                    activeMarkerIndex = -1;
+                                }
+                            }
+                        } else {
+                            // Наразі жоден маркер не активний — шукаємо видимий маркер
+                            for (let i = 0; i < markerRoots.length; i++) {
+                                if (markerRoots[i] && markerRoots[i].visible) {
+                                    activeMarkerIndex = i;
+                                    playMedia(activeMarkerIndex);
+                                    break;
                                 }
                             }
                         }
